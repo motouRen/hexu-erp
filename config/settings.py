@@ -4,11 +4,12 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEBUG = os.environ.get("ERP_DEBUG", "1") == "1"
+DEMO_MODE = os.environ.get("ERP_DEMO_MODE", "0") == "1"
 SECRET_KEY = os.environ.get("ERP_SECRET_KEY", "")
 if not SECRET_KEY:
-    if not DEBUG:
+    if not DEBUG and not DEMO_MODE:
         raise RuntimeError("Production requires ERP_SECRET_KEY")
-    secret_file = BASE_DIR / ".local-secret"
+    secret_file = BASE_DIR / (".demo-secret" if DEMO_MODE else ".local-secret")
     if not secret_file.exists():
         secret_file.write_text(secrets.token_urlsafe(64), encoding="utf-8")
     SECRET_KEY = secret_file.read_text(encoding="utf-8").strip()
@@ -30,13 +31,18 @@ TEMPLATES = [{"BACKEND": "django.template.backends.django.DjangoTemplates", "DIR
                   "django.contrib.messages.context_processors.messages"]}}]
 WSGI_APPLICATION = "config.wsgi.application"
 if os.environ.get("ERP_DB_HOST"):
+    if DEMO_MODE and "demo" not in os.environ.get("ERP_DB_NAME", "hexu").lower():
+        raise RuntimeError("Public demo requires a separately named demo database")
     DATABASES = {"default": {"ENGINE": "django.db.backends.postgresql", "NAME": os.environ.get("ERP_DB_NAME", "hexu"),
         "USER": os.environ.get("ERP_DB_USER", "hexu"), "PASSWORD": os.environ["ERP_DB_PASSWORD"],
         "HOST": os.environ["ERP_DB_HOST"], "PORT": os.environ.get("ERP_DB_PORT", "5432"), "CONN_MAX_AGE": 60}}
 else:
-    if not DEBUG:
+    if not DEBUG and not DEMO_MODE:
         raise RuntimeError("Production requires PostgreSQL (ERP_DB_HOST)")
-    DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3", "OPTIONS": {"timeout": 20}}}
+    sqlite_path = os.environ.get("ERP_SQLITE_PATH", str(BASE_DIR / ("demo.sqlite3" if DEMO_MODE else "db.sqlite3")))
+    if DEMO_MODE and "demo" not in Path(sqlite_path).name.lower():
+        raise RuntimeError("Public demo must not use the regular business database")
+    DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": sqlite_path, "OPTIONS": {"timeout": 20}}}
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
@@ -67,5 +73,5 @@ if not DEBUG:
     SECURE_SSL_REDIRECT = True
     SECURE_HSTS_SECONDS = 31536000
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    if os.environ.get("ERP_TRUST_PROXY") == "1":
-        SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+if os.environ.get("ERP_TRUST_PROXY") == "1":
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")

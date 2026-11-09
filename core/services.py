@@ -3,6 +3,7 @@ from uuid import uuid4
 from django.db import transaction
 from django.utils import timezone
 from .models import Product, Store, Channel, Inventory, Order, OrderLine, StockMovement, Payment, ReturnLine, AuditEvent
+from .access import require_store, require_operation
 
 
 class BusinessError(Exception):
@@ -58,35 +59,35 @@ def lock_inventory(store, product_id):
     return Inventory.objects.select_for_update().get(store=store, product_id=product_id)
 
 
-def move(balance, actor, kind, quantity_delta, reserved_delta=0, order=None, note=""):
+def move(balance, actor, kind, quantity_delta, reserved_delta=0, order=None, note="", document=None):
     balance.on_hand += quantity_delta
     balance.reserved += reserved_delta
     if balance.reserved < 0 or balance.on_hand < balance.reserved:
         raise BusinessError("可用库存不足，请减少数量或先补货", "insufficient_stock", 409)
     if balance.on_hand > 2000000000:
         raise BusinessError("库存数量超出范围")
-    balance.save(update_fields=["on_hand", "reserved"])
+    balance.version += 1
+    balance.save(update_fields=["on_hand", "reserved", "version"])
     StockMovement.objects.create(product=balance.product, store=balance.store, actor=actor,
         kind=kind, quantity_delta=quantity_delta, reserved_delta=reserved_delta, order=order,
-        note=note, on_hand_after=balance.on_hand, reserved_after=balance.reserved)
+        note=note, document=document, on_hand_after=balance.on_hand, reserved_after=balance.reserved)
 
 
 @transaction.atomic
 def receive_stock(data, actor):
-    product, store = lookup(Product, data.get("product_id")), lookup(Store, data.get("store_id"))
-    quantity = integer(data.get("quantity"))
+    from .stock import create_document, post_document
     note = text(data.get("note", ""), "入库备注", 240, required=False)
-    balance = lock_inventory(store, product.id)
-    if balance.on_hand + quantity > 2000000000:
-        raise BusinessError("库存数量超出范围")
-    move(balance, actor, "receive", quantity, note=note)
-    audit(actor, "stock.receive", product.sku, {"store": store.name, "quantity": quantity, "note": note})
-    return {"message": "补货已入库", "product_id": product.id}
+    result = create_document({"kind": "receive", "store_id": data.get("store_id"),
+        "source": note[:120], "note": note, "items": [{"product_id": data.get("product_id"), "quantity": data.get("quantity")}]}, actor)
+    post_document(result["id"], {}, actor)
+    return {"message": "补货已入库，已生成入库单", "product_id": int(data["product_id"]), "document_id": result["id"]}
 
 
 @transaction.atomic
 def create_order(data, actor):
+    require_operation(actor)
     store, channel = lookup(Store, data.get("store_id")), lookup(Channel, data.get("channel_id"))
+    require_store(actor, store.id)
     customer = text(data.get("customer", ""), "客户名称", 80)
     external_id = text(data.get("external_id", ""), "渠道订单号", 80, required=False)
     if external_id and Order.objects.filter(channel=channel, external_id=external_id).exists():
@@ -122,16 +123,19 @@ def create_order(data, actor):
     return {"message": "订单已创建，库存已占用", "id": order.id, "number": order.number}
 
 
-def locked_order(order_id):
+def locked_order(order_id, actor):
+    require_operation(actor)
     try:
-        return Order.objects.select_for_update().get(pk=order_id)
+        order = Order.objects.select_for_update().get(pk=order_id)
+        require_store(actor, order.store_id)
+        return order
     except Order.DoesNotExist:
         raise BusinessError("订单不存在", "not_found", 404)
 
 
 @transaction.atomic
 def pay_order(order_id, data, actor):
-    order = locked_order(order_id)
+    order = locked_order(order_id, actor)
     if order.paid_at or order.status != "pending":
         raise BusinessError("此订单不能再次登记收款", "invalid_state", 409)
     reference = text(data.get("reference", ""), "收款凭证", 120)
@@ -144,7 +148,7 @@ def pay_order(order_id, data, actor):
 
 @transaction.atomic
 def ship_order(order_id, data, actor):
-    order = locked_order(order_id)
+    order = locked_order(order_id, actor)
     if order.status != "pending" or not order.paid_at:
         raise BusinessError("只有已登记收款的待发货订单才能发货", "invalid_state", 409)
     lines = list(order.lines.select_related("product").order_by("product_id"))
@@ -159,7 +163,7 @@ def ship_order(order_id, data, actor):
 
 @transaction.atomic
 def cancel_order(order_id, data, actor):
-    order = locked_order(order_id)
+    order = locked_order(order_id, actor)
     if order.status != "pending" or order.paid_at:
         raise BusinessError("仅未收款待发货订单可取消；已收款请登记退款", "invalid_state", 409)
     for line in order.lines.order_by("product_id"):
@@ -172,7 +176,7 @@ def cancel_order(order_id, data, actor):
 
 @transaction.atomic
 def refund_order(order_id, data, actor):
-    order = locked_order(order_id)
+    order = locked_order(order_id, actor)
     if not order.paid_at or order.status not in ["pending", "shipped", "partial_return"]:
         raise BusinessError("此订单不能登记退款", "invalid_state", 409)
     reference = text(data.get("reference", ""), "退款凭证", 120)

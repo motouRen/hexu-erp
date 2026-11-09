@@ -1,4 +1,18 @@
-# v0.1 API 约定
+# v0.2 API 约定
+
+v0.2 新增接口：
+
+| 方法与路径 | 内容 |
+| --- | --- |
+| GET /api/records/{resource}/ | resource=orders/inventory/payments/movements/documents/audit；返回 results/page/pages/page_size/count |
+| POST /api/stock/documents/ | kind=receive/transfer/count，store_id，调拨用 target_store_id，source，note，items=[{product_id,quantity}] |
+| POST /api/stock/documents/{id}/post/ | 入库/调拨草稿过账；盘点已提交单由另一名有 approve_stock 权限的成员审批，接收 note |
+| POST /api/stock/documents/{id}/submit/ | 盘点草稿提交审批 |
+| POST /api/stock/documents/{id}/cancel/ | 草稿/审批申请撤销，或没有后续库存业务的已过账入库/调拨冲销 |
+
+records 和 export 共用 q、store、status、channel、kind、date_from、date_to 过滤；channel 用于订单及资金，kind 用于库存单据，日期格式 YYYY-MM-DD。page 默认 1，page_size 默认 20，最多 100。超出末页会返回最后一页，元数据给出实际页码。库存查询的 status=low 过滤预警库存。审计列表仅超级用户可见。
+
+所有业务查询与导出都受 StoreAccess 约束；手工指定未授权门店返回 403。调拨两端都需授权。state 只提供最近 20 条摘要用于概览，完整列表请调用 records。CSV 导出全部匹配数据，不受分页限制。以下基础业务接口继续兼容；旧版关于全局读取与固定 200 条上限的说明由本段替代。
 
 同源 JSON API，通过 `/login/` 登录获取 Session；写入需 CSRF Cookie 对应的 `X-CSRFToken` 和一个 UUID 格式的 `Idempotency-Key`。每个新业务意图使用新键；网络失败后相同内容重试保留原键。API 不提供密码登录 JSON 接口，也不提供第三方令牌认证。
 

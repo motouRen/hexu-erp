@@ -5,8 +5,18 @@
   const currency = value => Number(value || 0).toLocaleString('zh-CN', {minimumFractionDigits:2, maximumFractionDigits:2});
   const time = value => new Date(value).toLocaleString('zh-CN', {timeZone:'Asia/Shanghai', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false});
   const labels = {dashboard:['经营概览','BUSINESS OVERVIEW','掌握订单、库存与收款，开始今天的经营。'],orders:['订单中心','ORDER MANAGEMENT','汇集各个渠道的订单，统一占用库存与发货。'],products:['商品资料','PRODUCT CATALOG','统一商品编码与售价，库存按门店分别管理。'],inventory:['库存管理','INVENTORY','实物、占用与可用库存，清楚区分每一件商品。'],channels:['门店与渠道','STORES & CHANNELS','管理履约门店与订单来源。'],payments:['收款与退款','PAYMENT RECORDS','登记实际发生的收退款，并保留对应凭证。'],movements:['库存流水','STOCK MOVEMENTS','查看每次入库、占用、发货与退货的记录。'],audit:['操作记录','ACTIVITY LOG','追溯关键业务操作与执行人。']};
+  labels.documents=['库存单据','STOCK DOCUMENTS','补货、调拨与盘点，按单据核对每一次库存变化。'];
   let state = null, page = 'dashboard', filters = {q:'',status:'all'}, toastTimer;
   const content = $('#page-content'), dialog = $('#app-dialog');
+  const serverPages=new Set(['orders','inventory','payments','movements','audit','documents']);
+  let pagination={page:1,pages:1,count:0,page_size:20}, requestSequence=0, searchTimer;
+  const stockUI=window.HexuStock({getState:()=>state,getFilters:()=>filters,esc,time,table,form,showDialog,closeDialog,options,searchbox,exportButton,api,toast});
+  function queryParams(){const params=new URLSearchParams();const store=$('#store-filter').value;if(store)params.set('store',store);Object.entries(filters).forEach(([key,value])=>{if(value&&value!=='all')params.set(key,value);});return params;}
+  async function loadRows(){if(!serverPages.has(page))return;const current=page,sequence=++requestSequence,params=queryParams();params.set('page',pagination.page);params.set('page_size',pagination.page_size);const result=await api('/api/records/'+current+'/?'+params);if(current!==page||sequence!==requestSequence)return;state[current]=result.results;pagination=result;}
+  async function refreshRecords(focus=false){const active=document.activeElement?.id,position=document.activeElement?.selectionStart;try{await loadRows();render();if(focus&&active==='table-search'){const input=$('#table-search');input?.focus();if(input)input.setSelectionRange(position,position);}}catch(error){toast(error.message);}}
+  function filterControls(){if(!serverPages.has(page)||page==='inventory'||page==='audit')return '';return `<div class="query-filters">${['orders','payments'].includes(page)?`<label>来源渠道<select data-filter="channel"><option value="">全部渠道</option>${state.channels.map(c=>`<option value="${c.id}" ${filters.channel==c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select></label>`:''}${page==='documents'?`<label>单据类型<select data-filter="kind"><option value="">全部类型</option>${[['receive','补货入库'],['transfer','门店调拨'],['count','库存盘点']].map(([key,label])=>`<option value="${key}" ${filters.kind===key?'selected':''}>${label}</option>`).join('')}</select></label>`:''}<label>开始日期<input type="date" data-filter="date_from" value="${esc(filters.date_from||'')}"></label><label>结束日期<input type="date" data-filter="date_to" value="${esc(filters.date_to||'')}"></label><button class="text-button" data-clear-filters>清除筛选</button><span class="scope-note">按当前门店权限查询与导出</span></div>`;}
+  function paginationBar(){return `<div class="pagination-bar"><span>共 ${pagination.count} 条 · 第 ${pagination.page} / ${pagination.pages} 页</span><div class="toolbar-group"><button class="button small" data-page-step="-1" ${pagination.page<=1?'disabled':''}>上一页</button><button class="button small" data-page-step="1" ${pagination.page>=pagination.pages?'disabled':''}>下一页</button></div></div>`;}
+
 
   function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),3500); }
   async function api(path, data, key) {
@@ -23,24 +33,25 @@
   async function load() {
     const selected=$('#store-filter').value;
     state=await api('/api/state/' + (selected ? '?store='+encodeURIComponent(selected) : ''));
-    $('#store-filter').innerHTML='<option value="">全部门店</option>'+state.stores.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('');
+    $('#store-filter').innerHTML='<option value="">全部授权门店</option>'+state.stores.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('');
     $('#store-filter').value=selected;
     $('#business-date').textContent=state.today.replaceAll('-',' / ');
     $('#nav-pending').textContent=state.stats.pending || '';
-    render();
+    await loadRows();render();
   }
-  function navigate(next) {
+  async function navigate(next) {
     if(!labels[next]) return;
-    page=next; filters={q:'',status:'all'}; history.replaceState(null,'','#'+page);
-    $('.sidebar').classList.remove('open'); render();
+    page=next;filters={q:'',status:'all'};pagination.page=1;history.replaceState(null,'','#'+page);
+    $('.sidebar').classList.remove('open');window.scrollTo({top:0});
+    try{await loadRows();render();}catch(error){toast(error.message);}
   }
   function status(o) { return `<span class="status ${esc(o.status)}">${esc(o.status_label)}</span>`; }
   function blank(message='暂时没有记录') { return `<div class="empty">${esc(message)}</div>`; }
   function table(head, rows) { return rows.length ? `<div class="table-wrap"><table class="data-table"><thead><tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>` : blank(filters.q ? '没有匹配的记录，请调整搜索条件。' : '暂无记录，可以从右上角开始新增。'); }
   function searchbox(placeholder) { return `<input class="search-input" id="table-search" type="search" aria-label="${placeholder}" placeholder="⌕  ${placeholder}" value="${esc(filters.q)}">`; }
-  function matches(...values) { return values.join(' ').toLowerCase().includes(filters.q.trim().toLowerCase()); }
-  function exportButton(resource,label='导出 CSV') { return `<a class="button small" href="/api/export/${resource}/">↓ ${label}</a>`; }
-  function footer(total,limit=200) { return `<div class="table-footnote"><span>显示 ${Math.min(total,limit)} 条${total>=limit?' · 列表最多展示最近 '+limit+' 条':''}</span><span>导出文件包含全部门店的完整记录</span></div>`; }
+  function matches(...values) { return serverPages.has(page)||values.join(' ').toLowerCase().includes(filters.q.trim().toLowerCase()); }
+  function exportButton(resource,label='导出当前结果') { return `<a class="button small" href="/api/export/${resource}/?${queryParams()}">↓ ${label}</a>`; }
+  function footer() { return ''; }
   function orderRows(orders) { return orders.map(o=>`<tr><td><button class="text-button order-number" data-order="${o.id}">${esc(o.number)}</button><small>${time(o.created_at)}</small></td><td>${esc(o.customer)}<small>${esc(o.items.map(i=>i.name).join('、'))}</small></td><td>${esc(o.channel)}<small>${esc(o.store)}</small></td><td class="number">¥${currency(o.total)}<small>${o.refunded_total!=='0.00'?'已退 ¥'+currency(o.refunded_total):o.paid?'已登记收款':'待收款'}</small></td><td>${status(o)}</td><td class="align-right"><button class="text-button" data-order="${o.id}">查看 →</button></td></tr>`); }
   function renderChart() {
     const panelWidth=window.innerWidth>800 ? (content.clientWidth-23)*1.9/2.9 : content.clientWidth;
@@ -67,14 +78,14 @@
     return `<section class="panel"><div class="filter-tabs">${tabs.map(([key,label])=>`<button class="filter-tab ${filters.status===key?'active':''}" data-status="${key}">${label}</button>`).join('')}</div><div class="toolbar">${searchbox('搜索订单号、客户或商品')}<div class="toolbar-group">${state.user.can_operate?'<button class="button small" data-action="import">↑ 导入渠道订单</button>':''}${exportButton('orders')}</div></div>${table(['订单编号','客户 / 商品','渠道 / 门店','订单金额','订单状态',''],orderRows(rows))}${footer(rows.length)}</section>`;
   }
   function products() {
-    const rows=state.products.filter(p=>matches(p.sku,p.name,p.category)).map(p=>{const stocks=state.inventory.filter(i=>i.product_id===p.id);const count=stocks.reduce((s,i)=>s+i.available,0);return `<tr><td class="sku">${esc(p.sku)}</td><td>${esc(p.name)}</td><td>${esc(p.category)}</td><td class="number">¥${currency(p.price)}</td><td class="number">${count.toLocaleString()}</td><td>${p.reorder_level}</td><td><div class="toolbar-group">${state.user.can_manage?`<button class="text-button" data-action="product" data-product="${p.id}">编辑</button>`:''}<button class="text-button" data-action="receive" data-product="${p.id}" ${state.user.can_operate?'':'hidden'}>补货入库 →</button></div></td></tr>`;});
+    const rows=state.products.filter(p=>matches(p.sku,p.name,p.category)).map(p=>{const stocks=state.inventory.filter(i=>i.product_id===p.id);const count=p.available??stocks.reduce((s,i)=>s+i.available,0);return `<tr><td class="sku">${esc(p.sku)}</td><td>${esc(p.name)}</td><td>${esc(p.category)}</td><td class="number">¥${currency(p.price)}</td><td class="number">${count.toLocaleString()}</td><td>${p.reorder_level}</td><td><div class="toolbar-group">${state.user.can_manage?`<button class="text-button" data-action="product" data-product="${p.id}">编辑</button>`:''}<button class="text-button" data-action="receive" data-product="${p.id}" ${state.user.can_operate?'':'hidden'}>补货入库 →</button></div></td></tr>`;});
     return `<section class="panel"><div class="toolbar">${searchbox('搜索 SKU、名称或分类')}<span class="kpi-detail">共 ${state.products.length} 个商品 · 单一销售单位</span></div>${table(['商品编码','商品名称','分类','参考售价','可用库存','预警阈值',''],rows)}<div class="table-footnote"><span>创建订单时可调整成交单价，历史订单保留原始价格。</span></div></section>`;
   }
   function inventory() {
     const rows=state.inventory.filter(i=>matches(i.sku,i.name,i.store)&&(filters.status!=='low'||i.available<=i.reorder_level)).map(i=>`<tr><td>${esc(i.name)}<small>${esc(i.sku)}</small></td><td>${esc(i.store)}</td><td class="number">${i.on_hand}</td><td>${i.reserved}</td><td class="number ${i.available<=i.reorder_level?'lowstock':''}">${i.available}</td><td>${i.available<=i.reorder_level?'<span class="status warning">低于或等于预警线</span>':'<span class="status shipped">库存充足</span>'}</td><td class="align-right">${state.user.can_operate?`<button class="text-button" data-action="receive" data-product="${i.product_id}" data-store="${i.store_id}">补货 →</button>`:''}</td></tr>`);
     return `<section class="panel"><div class="filter-tabs"><button class="filter-tab ${filters.status==='all'?'active':''}" data-status="all">全部库存</button><button class="filter-tab ${filters.status==='low'?'active':''}" data-status="low">库存预警 ${state.stats.low_stock}</button></div><div class="toolbar">${searchbox('搜索 SKU、商品或门店')}${exportButton('inventory')}</div>${table(['商品 / SKU','门店','实物库存','订单占用','可用库存','库存状态',''],rows)}<div class="table-footnote"><span>可用 = 实物 − 占用；订单创建时占用，发货时扣实物。</span><span>${rows.length} 项库存</span></div></section>`;
   }
-  function channels() {return `<div class="entity-grid"><section class="panel"><div class="panel-head"><div class="panel-title"><h2>履约门店</h2><small>${state.stores.length} 个门店 · 独立管理库存</small></div>${state.user.can_manage?'<button class="text-button" data-action="store">＋ 新建门店</button>':''}</div>${state.stores.map(s=>`<div class="entity-row"><div><h3>${esc(s.name)}</h3><p>${esc(s.code)} · ${esc(s.location||'尚未填写地址')}</p></div><span class="status shipped">使用中</span></div>`).join('')||blank('暂无门店')}</section><section class="panel"><div class="panel-head"><div class="panel-title"><h2>销售渠道</h2><small>手工录单或 CSV 导入</small></div>${state.user.can_manage?'<button class="text-button" data-action="channel">＋ 新建渠道</button>':''}</div>${state.channels.map(c=>`<div class="entity-row"><div><h3>${esc(c.name)}</h3><p>${c.kind==='retail'?'线下门店':'线上渠道'} · ${c.orders} 笔订单</p></div><span class="status">手工管理</span></div>`).join('')||blank('暂无渠道')}<div class="connection-note">当前版本支持渠道标记和 CSV 导入。自动拉单、支付回调与平台库存同步列入后续版本。</div></section></div>`;}
+  function channels() {return `<div class="entity-grid"><section class="panel"><div class="panel-head"><div class="panel-title"><h2>履约门店</h2><small>${state.stores.length} 个门店 · 独立管理库存</small></div>${state.user.can_manage?'<button class="text-button" data-action="store">＋ 新建门店</button>':''}</div>${state.stores.map(s=>`<div class="entity-row"><div><h3>${esc(s.name)}</h3><p>${esc(s.code)} · ${esc(s.location||'尚未填写地址')}</p></div><span class="status shipped">使用中</span></div>`).join('')||blank('暂无门店')}</section><section class="panel"><div class="panel-head"><div class="panel-title"><h2>销售渠道</h2><small>手工录单或 CSV 导入</small></div>${state.user.can_manage?'<button class="text-button" data-action="channel">＋ 新建渠道</button>':''}</div>${state.channels.map(c=>`<div class="entity-row"><div><h3>${esc(c.name)}</h3><p>${esc(c.code)} · ${c.kind==='retail'?'线下门店':'线上渠道'} · ${c.orders} 笔订单</p></div><span class="status">手工管理</span></div>`).join('')||blank('暂无渠道')}<div class="connection-note">当前版本支持渠道标记和 CSV 导入。自动拉单、支付回调与平台库存同步列入后续版本。</div></section></div>`;}
   function payments() {const rows=state.payments.filter(p=>matches(p.number,p.reference,p.channel)).map(p=>`<tr><td class="order-number">${esc(p.number)}</td><td>${esc(p.channel)}</td><td><span class="status ${p.kind==='receipt'?'shipped':'returned'}">${p.kind==='receipt'?'收款登记':'退款登记'}</span></td><td class="number">${p.kind==='refund'?'−':'+'} ¥${currency(p.amount)}</td><td>${esc(p.reference)}</td><td>${esc(p.actor)}</td><td>${time(p.created_at)}</td></tr>`);return `<section class="panel"><div class="toolbar">${searchbox('搜索订单、渠道或凭证')}${exportButton('payments')}</div>${table(['关联订单','来源渠道','类型','金额','收退款凭证','操作人','登记时间'],rows)}${footer(rows.length)}</section>`;}
   function movements() {const rows=state.movements.filter(m=>matches(m.sku,m.name,m.store,m.number,m.note)).map(m=>`<tr><td>${esc(m.name)}<small>${esc(m.sku)}</small></td><td>${esc(m.store)}</td><td>${esc(m.kind)}</td><td class="delta ${m.delta<0?'negative':''}">${m.delta>0?'+':''}${m.delta}</td><td>${m.reserved_delta>0?'+':''}${m.reserved_delta}</td><td>${m.on_hand_after} / ${m.reserved_after}</td><td class="order-number">${esc(m.number)}<small>${esc(m.note)}</small></td><td>${esc(m.actor)}<small>${time(m.created_at)}</small></td></tr>`);return `<section class="panel"><div class="toolbar">${searchbox('搜索商品、门店或订单')}<span class="kpi-detail">库存流水随业务生成，保留原始记录</span></div>${table(['商品 / SKU','门店','业务类型','实物变动','占用变动','变动后实物 / 占用','关联订单 / 备注','操作人 / 时间'],rows)}${footer(rows.length)}</section>`;}
   function audit() {const names={'order.create':'创建订单','order.pay':'登记收款','order.ship':'订单发货','order.cancel':'取消订单','order.refund':'退货退款','order.import':'CSV 导入','stock.receive':'补货入库','product.create':'创建商品','store.create':'创建门店','channel.create':'创建渠道'};const rows=state.audit.filter(a=>matches(a.action,a.object_ref,a.actor,names[a.action]||'')).map(a=>`<tr><td>${time(a.created_at)}</td><td>${esc(a.actor)}</td><td>${esc(names[a.action]||a.action)}</td><td class="order-number">${esc(a.object_ref)}</td><td>${esc(Object.entries(a.detail).map(([k,v])=>k+': '+v).join(' · ')||'—')}</td></tr>`);return `<section class="panel"><div class="toolbar">${searchbox('搜索操作、单号或执行人')}<span class="kpi-detail">仅管理员可见</span></div>${table(['发生时间','执行人','操作','业务对象','详情'],rows)}${footer(rows.length,100)}</section>`;}
@@ -83,9 +94,9 @@
     const [title,eyebrow,description]=labels[page]; $('#page-title').textContent=title; $('#crumb-title').textContent=title; $('#page-eyebrow').textContent=eyebrow; $('#page-description').textContent=description;
     document.querySelectorAll('[data-page]').forEach(button=>{button.classList.toggle('active',button.dataset.page===page);button.setAttribute('aria-current',button.dataset.page===page?'page':'false');});
     const primary=$('#primary-action');
-    const action={products:['＋ 新建商品','product',state.user.can_manage],inventory:['＋ 补货入库','receive',state.user.can_operate],channels:['＋ 新建渠道','channel',state.user.can_manage]}[page]||['＋ 新建订单','order',state.user.can_operate];
+    const action={products:['＋ 新建商品','product',state.user.can_manage],inventory:['＋ 补货入库','receive',state.user.can_operate],channels:['＋ 新建渠道','channel',state.user.can_manage],documents:['＋ 新建库存单','stockDocument',state.user.can_operate]}[page]||['＋ 新建订单','order',state.user.can_operate];
     primary.textContent=action[0];primary.dataset.action=action[1];primary.hidden=!action[2];primary.disabled=false;
-    content.innerHTML=({dashboard,orders,products,inventory,channels,payments,movements,audit}[page])();
+    content.innerHTML=filterControls()+({dashboard,orders,products,inventory,channels,payments,movements,audit,documents:stockUI.render}[page])()+(serverPages.has(page)?paginationBar():'');
   }
   function showDialog(title,html) {$('#dialog-title').textContent=title;$('#dialog-body').innerHTML=html;dialog.showModal();}
   function closeDialog(){dialog.close();}
@@ -143,18 +154,23 @@
     const target=event.target.closest('button,a');if(!target)return;
     if(target.dataset.page)navigate(target.dataset.page);
     if(target.dataset.nav)navigate(target.dataset.nav);
-    if(target.dataset.status){filters.status=target.dataset.status;render();}
+    if(target.dataset.status){filters.status=target.dataset.status;pagination.page=1;refreshRecords();}
     if(target.hasAttribute('data-close'))closeDialog();
     if(target.dataset.order)detail(target.dataset.order);
+    if(target.dataset.document)stockUI.detail(target.dataset.document);
+    if(target.dataset.stockAction)stockUI.action(target.dataset.id,target.dataset.stockAction);
+    if(target.dataset.pageStep){pagination.page+=Number(target.dataset.pageStep);refreshRecords();}
+    if(target.hasAttribute('data-clear-filters')){filters={q:'',status:'all'};pagination.page=1;refreshRecords();}
     if(target.dataset.orderAction)orderAction(target.dataset.id,target.dataset.orderAction);
-    const actions={order:newOrder,product:()=>productForm(target.dataset.product),store:storeForm,channel:channelForm,import:importForm,receive:()=>receiveStock(target.dataset.product,target.dataset.store)};
+    const actions={stockDocument:stockUI.create,order:newOrder,product:()=>productForm(target.dataset.product),store:storeForm,channel:channelForm,import:importForm,receive:()=>receiveStock(target.dataset.product,target.dataset.store)};
     if(target.dataset.action&&actions[target.dataset.action])actions[target.dataset.action]();
   });
   content.addEventListener('input',event=>{
     if(event.target.id!=='table-search')return;
-    const position=event.target.selectionStart;filters.q=event.target.value;render();const input=$('#table-search');input.focus();input.setSelectionRange(position,position);
+    const position=event.target.selectionStart;filters.q=event.target.value;pagination.page=1;clearTimeout(searchTimer);if(serverPages.has(page)){searchTimer=setTimeout(()=>refreshRecords(true),250);}else{render();const input=$('#table-search');input.focus();input.setSelectionRange(position,position);}
   });
-  $('#store-filter').addEventListener('change',()=>load().catch(error=>toast(error.message)));
+  $('#store-filter').addEventListener('change',()=>{pagination.page=1;load().catch(error=>toast(error.message));});
+  content.addEventListener('change',event=>{if(event.target.dataset.filter){filters[event.target.dataset.filter]=event.target.value;pagination.page=1;refreshRecords();}});
   $('#dialog-close').addEventListener('click',closeDialog);
   $('#menu-toggle').addEventListener('click',()=>$('.sidebar').classList.toggle('open'));
   dialog.addEventListener('click',event=>{if(event.target===dialog){const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)closeDialog();}});

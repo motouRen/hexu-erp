@@ -42,6 +42,7 @@ class Inventory(models.Model):
     store = models.ForeignKey(Store, on_delete=models.PROTECT)
     on_hand = models.PositiveIntegerField(default=0)
     reserved = models.PositiveIntegerField(default=0)
+    version = models.PositiveBigIntegerField(default=0)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["product", "store"], name="inventory_product_store"),
@@ -93,8 +94,11 @@ class StockMovement(models.Model):
     product = models.ForeignKey(Product, on_delete=models.PROTECT)
     store = models.ForeignKey(Store, on_delete=models.PROTECT)
     order = models.ForeignKey(Order, null=True, blank=True, on_delete=models.PROTECT)
+    document = models.ForeignKey("StockDocument", null=True, blank=True, related_name="movements", on_delete=models.PROTECT)
     kind = models.CharField(max_length=20, choices=[("receive", "补货入库"), ("reserve", "订单占用"),
-        ("ship", "发货出库"), ("release", "取消释放"), ("return", "退货入库")])
+        ("ship", "发货出库"), ("release", "取消释放"), ("return", "退货入库"),
+        ("transfer_out", "调拨出库"), ("transfer_in", "调拨入库"), ("count", "盘点调整"),
+        ("reversal", "单据撤销")])
     quantity_delta = models.IntegerField()
     reserved_delta = models.IntegerField(default=0)
     on_hand_after = models.PositiveIntegerField()
@@ -135,7 +139,8 @@ class AuditEvent(models.Model):
 
     class Meta:
         ordering = ["-created_at", "-id"]
-        permissions = [("operate_erp", "操作 ERP 业务"), ("manage_catalog", "管理商品门店与渠道")]
+        permissions = [("operate_erp", "操作 ERP 业务"), ("manage_catalog", "管理商品门店与渠道"),
+                       ("approve_stock", "审批盘点差异")]
 
 
 class Mutation(models.Model):
@@ -143,4 +148,56 @@ class Mutation(models.Model):
     actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     fingerprint = models.CharField(max_length=64)
     response = models.JSONField(default=dict)
+    store_scope = models.JSONField(default=list)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class StoreAccess(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="store_access", on_delete=models.CASCADE)
+    store = models.ForeignKey(Store, on_delete=models.CASCADE)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["user", "store"], name="unique_user_store_access")]
+
+    def __str__(self):
+        return f"{self.user} · {self.store}"
+
+
+class StockDocument(models.Model):
+    number = models.CharField(max_length=40, unique=True)
+    kind = models.CharField(max_length=16, choices=[("receive", "补货入库单"), ("transfer", "门店调拨单"), ("count", "库存盘点单")])
+    store = models.ForeignKey(Store, related_name="stock_documents", on_delete=models.PROTECT)
+    target_store = models.ForeignKey(Store, related_name="incoming_documents", null=True, blank=True, on_delete=models.PROTECT)
+    status = models.CharField(max_length=16, default="draft", choices=[("draft", "草稿"), ("submitted", "待审批"), ("posted", "已过账"), ("canceled", "已撤销")])
+    source = models.CharField(max_length=120, blank=True)
+    note = models.CharField(max_length=240, blank=True)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="created_stock_documents", on_delete=models.PROTECT)
+    approved_by = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="approved_stock_documents", null=True, blank=True, on_delete=models.PROTECT)
+    approval_note = models.CharField(max_length=240, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    posted_at = models.DateTimeField(null=True, blank=True)
+    canceled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        constraints = [models.CheckConstraint(condition=(Q(kind="transfer", target_store__isnull=False) & ~Q(store=F("target_store"))) | (~Q(kind="transfer") & Q(target_store__isnull=True)), name="stock_document_stores_valid")]
+
+
+class StockDocumentLine(models.Model):
+    document = models.ForeignKey(StockDocument, related_name="lines", on_delete=models.PROTECT)
+    product = models.ForeignKey(Product, on_delete=models.PROTECT)
+    product_name = models.CharField(max_length=120)
+    sku = models.CharField(max_length=48)
+    quantity = models.PositiveIntegerField()
+    snapshot_quantity = models.PositiveIntegerField(default=0)
+    snapshot_reserved = models.PositiveIntegerField(default=0)
+    inventory_version = models.PositiveBigIntegerField(default=0)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["document", "product"], name="unique_document_product")]
+
+
+class LoginAttempt(models.Model):
+    key = models.CharField(max_length=64, unique=True)
+    failures = models.PositiveIntegerField(default=0)
+    window_started_at = models.DateTimeField()

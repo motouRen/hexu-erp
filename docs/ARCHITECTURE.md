@@ -1,5 +1,7 @@
 # 架构与数据设计
 
+v0.2 增加 `core/access.py`（门店作用域）、`core/queries.py`（共享查询/导出/分页）、`core/stock.py`（库存单据事务）、`core/login.py`（登录限速）。新增 StoreAccess、StockDocument/Line、LoginAttempt，库存余额增加 version，写入幂等记录保存授权门店快照。完整新增规则见 [v0.2 说明](V0.2.md)；下文的 v0.1 全商家读取与调拨规划已由 v0.2 实现替代。
+
 ## 架构决策
 
 首版采用模块化单体。Django 负责登录、权限、数据模型、事务和 API，工作台采用同源 HTML/CSS/原生 JavaScript。无需单独构建前端，贡献者能用一个 Python 环境启动完整业务。未来可在 API 边界接独立 Vue/React 前端，避免同步重写库存规则。

@@ -12,6 +12,7 @@ from django.db import IntegrityError, close_old_connections, connection, transac
 from django.test import Client, TestCase, TransactionTestCase
 from .models import Product, Store, Channel, Inventory, Order, OrderLine, StockMovement, Payment, AuditEvent
 from . import services as svc
+from .models import StoreAccess
 
 
 class WorkflowTests(TestCase):
@@ -21,6 +22,8 @@ class WorkflowTests(TestCase):
         self.operator = get_user_model().objects.create_user("operator", password="local-test-password-123")
         self.operator.user_permissions.add(Permission.objects.get(codename="operate_erp"))
         self.store = Store.objects.create(code="A", name="一号店")
+        StoreAccess.objects.create(user=self.operator, store=self.store)
+        StoreAccess.objects.create(user=self.viewer, store=self.store)
         self.channel = Channel.objects.create(code="WEB", name="线上渠道")
         self.product = Product.objects.create(sku="P1", name="马克杯", price="12.50")
         svc.receive_stock({"store_id": self.store.id, "product_id": self.product.id, "quantity": 10}, self.admin)

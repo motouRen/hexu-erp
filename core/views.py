@@ -14,6 +14,8 @@ from django.utils import timezone
 from django.views.decorators.http import require_GET
 from .models import Product, Store, Channel, Inventory, Order, StockMovement, Payment, AuditEvent, Mutation
 from . import services as svc
+from .access import require_store
+from django.conf import settings
 
 
 def api_guard(view):
@@ -58,10 +60,26 @@ def mutation(permission="core.operate_erp"):
                 if not created:
                     if record.actor_id != request.user.id or record.fingerprint != fingerprint:
                         raise svc.BusinessError("请求编号已经用于另一项操作", "idempotency_conflict", 409)
+                    for store_id in record.store_scope:
+                        require_store(request.user, store_id)
                     return JsonResponse(record.response)
                 result = view(request, data, *args, **kwargs)
                 record.response = result
-                record.save(update_fields=["response"])
+                scope = set()
+                for field in ("store_id", "target_store_id"):
+                    if data.get(field):
+                        scope.add(svc.integer(data[field], "门店编号"))
+                ids = result.get("ids", [result["id"]] if result.get("id") else [])
+                if "/orders/" in request.path:
+                    scope.update(Order.objects.filter(id__in=ids + ([kwargs["order_id"]] if "order_id" in kwargs else [])).values_list("store_id", flat=True))
+                if "/stock/documents/" in request.path:
+                    from .models import StockDocument
+                    for doc in StockDocument.objects.filter(id__in=ids + ([kwargs["document_id"]] if "document_id" in kwargs else [])):
+                        scope.add(doc.store_id)
+                        if doc.target_store_id:
+                            scope.add(doc.target_store_id)
+                record.store_scope = sorted(scope)
+                record.save(update_fields=["response", "store_scope"])
             return JsonResponse(result)
         return wrapped
     return decorate
@@ -70,7 +88,7 @@ def mutation(permission="core.operate_erp"):
 @login_required
 def index(request):
     return render(request, "index.html", {"can_operate": request.user.has_perm("core.operate_erp"),
-        "can_manage": request.user.has_perm("core.manage_catalog")})
+        "can_manage": request.user.is_superuser, "demo_mode": settings.DEMO_MODE})
 
 
 def amount(value):
@@ -80,69 +98,8 @@ def amount(value):
 @api_guard
 @require_GET
 def state(request):
-    store_filter = request.GET.get("store")
-    selected_store = svc.integer(store_filter, "门店编号") if store_filter else None
-    inventories = Inventory.objects.select_related("product", "store")
-    orders_qs = Order.objects.select_related("channel", "store").prefetch_related("lines", "payments")
-    movements = StockMovement.objects.select_related("product", "store", "order", "actor")
-    payments = Payment.objects.select_related("order", "actor", "order__channel")
-    if selected_store:
-        inventories = inventories.filter(store_id=selected_store)
-        orders_qs = orders_qs.filter(store_id=selected_store)
-        movements = movements.filter(store_id=selected_store)
-        payments = payments.filter(order__store_id=selected_store)
-    today = timezone.localdate()
-    today_payments = payments.filter(created_at__date=today)
-    received = today_payments.filter(kind="receipt").aggregate(v=Sum("amount"))["v"] or Decimal("0")
-    refunded = today_payments.filter(kind="refund").aggregate(v=Sum("amount"))["v"] or Decimal("0")
-    trend = []
-    for offset in range(6, -1, -1):
-        date = today - timezone.timedelta(days=offset)
-        entries = payments.filter(created_at__date=date)
-        r = entries.filter(kind="receipt").aggregate(v=Sum("amount"))["v"] or Decimal("0")
-        f = entries.filter(kind="refund").aggregate(v=Sum("amount"))["v"] or Decimal("0")
-        trend.append({"date": date.isoformat(), "received": amount(r), "refunded": amount(f), "net": amount(r-f)})
-    channel_stats = []
-    for channel in Channel.objects.all().order_by("id"):
-        channel_payments = payments.filter(order__channel=channel)
-        r = channel_payments.filter(kind="receipt").aggregate(v=Sum("amount"))["v"] or Decimal("0")
-        f = channel_payments.filter(kind="refund").aggregate(v=Sum("amount"))["v"] or Decimal("0")
-        channel_stats.append({"id": channel.id, "code": channel.code, "name": channel.name, "kind": channel.kind,
-            "orders": orders_qs.filter(channel=channel).count(), "net": amount(r-f)})
-    return JsonResponse({
-        "user": {"name": request.user.get_full_name() or request.user.username,
-            "can_operate": request.user.has_perm("core.operate_erp"), "can_manage": request.user.has_perm("core.manage_catalog")},
-        "today": today.isoformat(), "selected_store": selected_store,
-        "products": list(Product.objects.order_by("sku").values("id", "sku", "name", "category", "price", "reorder_level")),
-        "stores": list(Store.objects.order_by("id").values("id", "name", "code", "location")),
-        "channels": channel_stats,
-        "inventory": [{"id": row.id, "product_id": row.product_id, "sku": row.product.sku, "name": row.product.name,
-            "category": row.product.category, "store_id": row.store_id, "store": row.store.name, "on_hand": row.on_hand,
-            "reserved": row.reserved, "available": row.available, "reorder_level": row.product.reorder_level} for row in inventories.order_by("product__sku", "store_id")],
-        "orders": [{"id": order.id, "number": order.number, "external_id": order.external_id,
-            "customer": order.customer, "channel": order.channel.name, "channel_id": order.channel_id,
-            "store": order.store.name, "store_id": order.store_id, "status": order.status, "status_label": order.get_status_display(),
-            "total": amount(order.total), "refunded_total": amount(order.refunded_total), "paid": bool(order.paid_at),
-            "created_at": order.created_at.isoformat(), "shipped_at": order.shipped_at.isoformat() if order.shipped_at else None,
-            "items": [{"id": line.id, "product_id": line.product_id, "name": line.product_name, "sku": line.sku,
-                "quantity": line.quantity, "returned_quantity": line.returned_quantity, "unit_price": amount(line.unit_price)} for line in order.lines.all()],
-            "payments": [{"kind": p.kind, "amount": amount(p.amount), "reference": p.reference} for p in order.payments.all()]
-        } for order in orders_qs[:200]],
-        "movements": [{"id": m.id, "sku": m.product.sku, "name": m.product.name, "store": m.store.name,
-            "kind": m.get_kind_display(), "delta": m.quantity_delta, "reserved_delta": m.reserved_delta,
-            "on_hand_after": m.on_hand_after, "reserved_after": m.reserved_after, "number": m.order.number if m.order else "—",
-            "note": m.note, "actor": m.actor.username, "created_at": m.created_at.isoformat()} for m in movements[:200]],
-        "payments": [{"id": p.id, "number": p.order.number, "channel": p.order.channel.name, "kind": p.kind,
-            "amount": amount(p.amount), "reference": p.reference, "actor": p.actor.username, "created_at": p.created_at.isoformat()}
-            for p in payments.order_by("-created_at", "-id")[:200]],
-        "stats": {"today_net": amount(received-refunded), "today_received": amount(received), "today_refunded": amount(refunded),
-            "pending": orders_qs.filter(status="pending").count(), "low_stock": inventories.filter(on_hand__lte=F("reserved") + F("product__reorder_level")).count(),
-            "available": sum(i.available for i in inventories), "total_orders": orders_qs.count()},
-        "trend": trend,
-        "audit": [{"action": a.action, "object_ref": a.object_ref, "actor": a.actor.username, "detail": a.detail,
-            "created_at": a.created_at.isoformat()} for a in AuditEvent.objects.select_related("actor")[:100]] if request.user.has_perm("core.manage_catalog") else [],
-        "limits": {"orders": 200, "movements": 200, "payments": 200, "audit": 100},
-    })
+    from .queries import dashboard
+    return JsonResponse(dashboard(request.user, request.GET))
 
 
 @mutation("core.manage_catalog")
@@ -177,6 +134,8 @@ def stores(request, data):
         name=svc.text(data.get("name", ""), "门店名称", 80), location=svc.text(data.get("location", ""), "门店地址", 160, required=False))
     for product in Product.objects.all():
         Inventory.objects.create(product=product, store=store)
+    from .models import StoreAccess
+    StoreAccess.objects.get_or_create(user=request.user, store=store)
     svc.audit(request.user, "store.create", store.code)
     return {"message": "门店已创建", "id": store.id}
 
@@ -252,23 +211,11 @@ def csv_safe(value):
 @api_guard
 @require_GET
 def export_csv(request, resource):
+    from .queries import export_rows
     if resource == "template":
         rows = [["external_id", "channel_code", "store_code", "customer", "sku", "quantity", "unit_price"]]
-    elif resource == "orders":
-        rows = [["订单号", "渠道订单号", "渠道", "门店", "客户", "状态", "订单金额", "已退款", "收款状态", "创建时间"]]
-        for o in Order.objects.select_related("channel", "store").iterator():
-            rows.append([o.number, o.external_id, o.channel.name, o.store.name, o.customer, o.get_status_display(), o.total,
-                o.refunded_total, "已收款" if o.paid_at else "未收款", timezone.localtime(o.created_at).isoformat()])
-    elif resource == "inventory":
-        rows = [["SKU", "商品", "门店", "实物库存", "占用", "可用"]]
-        for i in Inventory.objects.select_related("product", "store").order_by("product__sku", "store_id").iterator():
-            rows.append([i.product.sku, i.product.name, i.store.name, i.on_hand, i.reserved, i.available])
-    elif resource == "payments":
-        rows = [["订单号", "类型", "金额", "凭证", "操作人", "登记时间"]]
-        for p in Payment.objects.select_related("order", "actor").order_by("-created_at").iterator():
-            rows.append([p.order.number, p.get_kind_display(), p.amount, p.reference, p.actor.username, timezone.localtime(p.created_at).isoformat()])
     else:
-        raise svc.BusinessError("导出类型不存在", "not_found", 404)
+        rows = export_rows(request.user, resource, request.GET)
     buffer = io.StringIO()
     writer = csv.writer(buffer)
     writer.writerows([[csv_safe(cell) for cell in row] for row in rows])
@@ -283,3 +230,25 @@ def health(request):
     with connection.cursor() as cursor:
         cursor.execute("SELECT 1")
     return JsonResponse({"status": "ok"})
+
+
+@api_guard
+@require_GET
+def records(request, resource):
+    from .queries import listing
+    return JsonResponse(listing(request.user, resource, request.GET))
+
+
+@mutation()
+def stock_documents(request, data):
+    from .stock import create_document
+    return create_document(data, request.user)
+
+
+@mutation()
+def stock_document_action(request, data, document_id, action):
+    from .stock import post_document, submit_document, cancel_document
+    actions = {"post": post_document, "submit": submit_document, "cancel": cancel_document}
+    if action not in actions:
+        raise svc.BusinessError("操作不存在", "not_found", 404)
+    return actions[action](document_id, data, request.user)

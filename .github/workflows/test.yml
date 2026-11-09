@@ -16,6 +16,10 @@ jobs:
       - run: python manage.py makemigrations --check --dry-run
       - run: python manage.py test
       - run: node --check static/app.js
+      - run: node --check static/stock-ui.js
+      - run: python manage.py migrate --noinput
+      - run: python manage.py init_demo
+      - run: python scripts/rehearse_restore.py
   postgresql:
     runs-on: ubuntu-latest
     services:
@@ -41,3 +45,6 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.lock.txt -r requirements-production.txt
       - run: python manage.py test
+      - run: python manage.py migrate --noinput
+      - run: python manage.py init_demo
+      - run: python scripts/rehearse_restore.py
