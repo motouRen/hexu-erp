@@ -8,7 +8,7 @@ from threading import Barrier
 from unittest import skipUnless
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Permission
-from django.db import IntegrityError, close_old_connections, connection, transaction
+from django.db import IntegrityError, close_old_connections, connection, connections, transaction
 from django.test import Client, TestCase, TransactionTestCase
 from .models import Product, Store, Channel, Inventory, Order, OrderLine, StockMovement, Payment, AuditEvent
 from . import services as svc
@@ -272,7 +272,7 @@ class PostgreSQLConcurrencyTests(TransactionTestCase):
             except svc.BusinessError as error:
                 return error.code
             finally:
-                close_old_connections()
+                connections.close_all()
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: reserve(), range(2)))
