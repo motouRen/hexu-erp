@@ -1,0 +1,4 @@
+external_id,channel_code,store_code,customer,sku,quantity,unit_price
+IMPORT-DEMO-001,TMALL,SH-01,导入演示客户,HX-001,1,89.00
+IMPORT-DEMO-001,TMALL,SH-01,导入演示客户,HX-002,1,68.00
+IMPORT-DEMO-002,DOUYIN,HZ-01,导入演示客户,HX-004,2,39.00

@@ -1,0 +1,6 @@
+# Verified runtime for Python 3.12. Regenerate deliberately when upgrading dependencies.
+Django==5.2.19
+asgiref==3.13.0
+sqlparse==0.6.1
+tzdata==2026.6
+whitenoise==6.12.0
